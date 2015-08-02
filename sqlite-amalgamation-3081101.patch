@@ -1,0 +1,169 @@
+diff -u sqlite-amalgamation-3081101.old/sqlite3.c sqlite-amalgamation-3081101/sqlite3.c
+--- sqlite-amalgamation-3081101.old/sqlite3.c	2015-07-29 16:06:58.000000000 -0400
++++ sqlite-amalgamation-3081101/sqlite3.c	2015-08-02 17:20:54.997681312 -0400
+@@ -25758,6 +25758,9 @@
+ #endif
+ 
+ /************** End of opcodes.c *********************************************/
++int ftruncate64(int file_descriptor, off64_t length);
++ssize_t pread64 (int fd, void * buf, size_t count, off64_t offset);
++ssize_t pwrite64 (int fd, const void * buf, size_t count, off64_t offset);
+ /************** Begin file os_unix.c *****************************************/
+ /*
+ ** 2004 May 22
+@@ -26340,8 +26343,13 @@
+ #define osFstat     ((int(*)(int,struct stat*))aSyscall[5].pCurrent)
+ #endif
+ 
++#ifdef __ANDROID__
++  { "ftruncate",    (sqlite3_syscall_ptr)ftruncate64,  0  },
++#define osFtruncate ((int(*)(int,off64_t))aSyscall[6].pCurrent)
++#else
+   { "ftruncate",    (sqlite3_syscall_ptr)ftruncate,  0  },
+ #define osFtruncate ((int(*)(int,off_t))aSyscall[6].pCurrent)
++#endif
+ 
+   { "fcntl",        (sqlite3_syscall_ptr)fcntl,      0  },
+ #define osFcntl     ((int(*)(int,int,...))aSyscall[7].pCurrent)
+@@ -26361,7 +26369,12 @@
+ #else
+   { "pread64",      (sqlite3_syscall_ptr)0,          0  },
+ #endif
++#ifdef __ANDROID__
++// Bionic defines pread64 using off64_t rather than off_t.
++#define osPread64   ((ssize_t(*)(int,void*,size_t,off64_t))aSyscall[10].pCurrent)
++#else
+ #define osPread64   ((ssize_t(*)(int,void*,size_t,off_t))aSyscall[10].pCurrent)
++#endif
+ 
+   { "write",        (sqlite3_syscall_ptr)write,      0  },
+ #define osWrite     ((ssize_t(*)(int,const void*,size_t))aSyscall[11].pCurrent)
+@@ -26379,8 +26392,14 @@
+ #else
+   { "pwrite64",     (sqlite3_syscall_ptr)0,          0  },
+ #endif
++#ifdef __ANDROID__
++// Bionic defines pwrite64 using off64_t rather than off_t.
++#define osPwrite64  ((ssize_t(*)(int,const void*,size_t,off64_t))\
++                    aSyscall[13].pCurrent)
++#else
+ #define osPwrite64  ((ssize_t(*)(int,const void*,size_t,off_t))\
+                     aSyscall[13].pCurrent)
++#endif
+ 
+   { "fchmod",       (sqlite3_syscall_ptr)fchmod,     0  },
+ #define osFchmod    ((int(*)(int,mode_t))aSyscall[14].pCurrent)
+@@ -26687,15 +26706,15 @@
+ */
+ static int robust_ftruncate(int h, sqlite3_int64 sz){
+   int rc;
+-#ifdef __ANDROID__
++//#ifdef __ANDROID__
+   /* On Android, ftruncate() always uses 32-bit offsets, even if 
+   ** _FILE_OFFSET_BITS=64 is defined. This means it is unsafe to attempt to
+   ** truncate a file to any size larger than 2GiB. Silently ignore any
+   ** such attempts.  */
+-  if( sz>(sqlite3_int64)0x7FFFFFFF ){
+-    rc = SQLITE_OK;
+-  }else
+-#endif
++//  if( sz>(sqlite3_int64)0x7FFFFFFF ){
++//    rc = SQLITE_OK;
++//  }else
++//#endif
+   do{ rc = osFtruncate(h,sz); }while( rc<0 && errno==EINTR );
+   return rc;
+ }
+@@ -27015,7 +27034,15 @@
+ #if OS_VXWORKS
+   struct vxworksFileId *pId;  /* Unique file ID for vxworks. */
+ #else
+-  ino_t ino;                  /* Inode number */
++//  ino_t ino;                  /* Inode number */
++#ifdef __ANDROID__
++  // Bionic's struct stat has a 64 bit st_ino on both 32 and
++  // 64 bit architectures. ino_t remains 32 bits wide on 32 bit
++  // architectures and can lead to inode truncation.
++  unsigned long long ino;     /* Inode number */
++#else
++  ino_t ino;     /* Inode number */
++#endif
+ #endif
+ };
+ 
+@@ -29630,7 +29657,8 @@
+   SimulateIOError( rc=1 );
+   if( rc!=0 ){
+     storeLastErrno((unixFile*)id, errno);
+-    return SQLITE_IOERR_FSTAT;
++//    return SQLITE_IOERR_FSTAT;
++      return unixLogError(SQLITE_IOERR_FSTAT, "fstat", ((unixFile*)id)->zPath);
+   }
+   *pSize = buf.st_size;
+ 
+@@ -29666,7 +29694,8 @@
+     struct stat buf;              /* Used to hold return values of fstat() */
+    
+     if( osFstat(pFile->h, &buf) ){
+-      return SQLITE_IOERR_FSTAT;
++//      return SQLITE_IOERR_FSTAT;
++        return unixLogError(SQLITE_IOERR_FSTAT, "fstat", pFile->zPath);
+     }
+ 
+     nSize = ((nByte+pFile->szChunk-1) / pFile->szChunk) * pFile->szChunk;
+@@ -30251,7 +30280,8 @@
+     ** with the same permissions.
+     */
+     if( osFstat(pDbFd->h, &sStat) && pInode->bProcessLock==0 ){
+-      rc = SQLITE_IOERR_FSTAT;
++//      rc = SQLITE_IOERR_FSTAT;
++      rc = unixLogError(SQLITE_IOERR_FSTAT, "fstat", pDbFd->zPath);
+       goto shm_open_err;
+     }
+ 
+@@ -31597,7 +31627,8 @@
+       *pUid = sStat.st_uid;
+       *pGid = sStat.st_gid;
+     }else{
+-      rc = SQLITE_IOERR_FSTAT;
++//      rc = SQLITE_IOERR_FSTAT;
++      rc = unixLogError(SQLITE_IOERR_FSTAT, "stat", zDb);
+     }
+   }else if( flags & SQLITE_OPEN_DELETEONCLOSE ){
+     *pMode = 0600;
+@@ -107032,7 +107063,8 @@
+   }
+   if( pDb->pSchema->file_format>SQLITE_MAX_FILE_FORMAT ){
+     sqlite3SetString(pzErrMsg, db, "unsupported file format");
+-    rc = SQLITE_ERROR;
++//    rc = SQLITE_ERROR;
++    rc = SQLITE_CORRUPT_BKPT; // Android Change from "rc = SQLITE_ERROR;"
+     goto initone_error_out;
+   }
+ 
+@@ -138378,13 +138410,25 @@
+   ** module with sqlite.
+   */
+   if( SQLITE_OK==rc 
++#ifndef __ANDROID__    /* fts3_tokenizer disabled for security reasons */
+    && SQLITE_OK==(rc = sqlite3Fts3InitHashTable(db, pHash, "fts3_tokenizer"))
++#endif
+    && SQLITE_OK==(rc = sqlite3_overload_function(db, "snippet", -1))
+    && SQLITE_OK==(rc = sqlite3_overload_function(db, "offsets", 1))
+    && SQLITE_OK==(rc = sqlite3_overload_function(db, "matchinfo", 1))
+    && SQLITE_OK==(rc = sqlite3_overload_function(db, "matchinfo", 2))
+    && SQLITE_OK==(rc = sqlite3_overload_function(db, "optimize", 1))
+   ){
++#ifdef SQLITE_ENABLE_FTS3_BACKWARDS
++    rc = sqlite3_create_module_v2(
++        db, "fts1", &fts3Module, (void *)pHash, 0
++        );
++    if(rc) return rc;
++    rc = sqlite3_create_module_v2(
++        db, "fts2", &fts3Module, (void *)pHash, 0
++        );
++    if(rc) return rc;
++#endif
+     rc = sqlite3_create_module_v2(
+         db, "fts3", &fts3Module, (void *)pHash, hashDestroy
+     );
